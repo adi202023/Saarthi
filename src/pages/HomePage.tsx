@@ -3,7 +3,6 @@ import { motion, useInView } from "framer-motion"
 import { Link } from "react-router-dom"
 import gsap from "gsap"
 import { Lock, Car, Radio, Shield, MapPin, AlertTriangle } from "lucide-react"
-import landingBg from "../assets/landing-bg.png"
 
 const fadeUp = { initial: { opacity: 0, y: 24 }, animate: { opacity: 1, y: 0 } }
 
@@ -51,13 +50,14 @@ export default function HomePage() {
         <nav className="flex items-center gap-8">
           <Link to="/wallet" className="text-[#A1A1AA] hover:text-white text-sm font-medium transition-colors duration-300">Wallet</Link>
           <Link to="/cab" className="text-[#A1A1AA] hover:text-white text-sm font-medium transition-colors duration-300">Cab</Link>
-          <Link to="/police" className="text-[#A1A1AA] hover:text-white text-sm font-medium transition-colors duration-300">Police Portal</Link>
+          <Link to="/police" className="text-[#A1A1AA] hover:text-white text-sm font-medium transition-colors duration-300">Police</Link>
         </nav>
       </header>
 
       <section ref={heroRef} className="relative min-h-screen flex flex-col items-center justify-center px-6 pt-20 pb-24 overflow-hidden">
-        <div className="absolute inset-0 -z-10 bg-cover bg-center bg-no-repeat" style={{ backgroundImage: `url(${landingBg})`, backgroundAttachment: "fixed" }} />
-        <div className="absolute inset-0 -z-[9] bg-black/10 pointer-events-none" />
+        <div className="absolute inset-0 -z-10" style={{ backgroundImage: "url('/background-4k-BqzvgkMx%20(2).svg')", backgroundSize: "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat", backgroundAttachment: "fixed" }} />
+        <div className="absolute inset-0 -z-[9] bg-[#0B0B0F]/30" />
+        <div className="absolute inset-0 -z-[9] pointer-events-none" style={{ background: "radial-gradient(ellipse 80% 50% at 50% 50%, rgba(124, 58, 237, 0.08) 0%, transparent 60%)" }} />
 
         <div className="text-center max-w-[1200px] mx-auto relative z-10">
           <h1 ref={headlineRef} className="text-[clamp(2.5rem,5vw,4.5rem)] font-extrabold leading-[1.2] tracking-tight text-white mb-3" style={{ fontWeight: 800 }}>
@@ -72,16 +72,20 @@ export default function HomePage() {
           <p ref={paraRef} className="text-[#A1A1AA]/90 text-sm md:text-base max-w-[600px] mx-auto mb-10 leading-relaxed">
             Sahayak protects individuals using cryptographic proof instead of storing sensitive data.
           </p>
-          <div ref={ctaRef} className="flex flex-col sm:flex-row flex-wrap gap-4 justify-center items-center">
+          <div ref={ctaRef} className="flex flex-col sm:flex-row gap-4 justify-center items-center">
             <Link to="/wallet" className="px-8 py-4 rounded-xl font-semibold text-white bg-gradient-to-r from-[#7C3AED] to-[#2563EB] hover:shadow-[0_0_30px_rgba(124,58,237,0.4)] transition-all duration-300 hover:scale-[1.05]">
               Explore the System
             </Link>
-            <Link to="/police" className="px-8 py-4 rounded-xl font-semibold text-white border border-green-500/60 bg-green-500/10 hover:bg-green-500/20 hover:border-green-400 transition-all duration-300 hover:scale-[1.05]">
-              Police Portal
-            </Link>
+            <button className="px-8 py-4 rounded-xl font-semibold text-white border border-white/20 hover:border-white/40 hover:bg-white/5 transition-all duration-300 hover:scale-[1.05]">
+              View Demo
+            </button>
           </div>
         </div>
 
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 2, duration: 0.6 }} className="absolute bottom-10 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2">
+          <span className="text-[#A1A1AA]/70 text-xs tracking-widest uppercase">Scroll</span>
+          <motion.div animate={{ y: [0, 6, 0] }} transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }} className="w-px h-6 bg-gradient-to-b from-[#7C3AED]/50 to-transparent" />
+        </motion.div>
       </section>
 
       <div className="relative bg-[#0B0B0F]">
