@@ -6,6 +6,7 @@ import {
   Play, Square, Radio, Cpu, Zap, MapPin,
   Wifi, WifiOff, Network,
   Sliders, AlertCircle, ShieldAlert, CheckCircle2,
+  Clock, Shield, Car, Star, UserCheck,
 } from "lucide-react"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
@@ -38,6 +39,21 @@ interface NominatimResult {
   display_name: string
 }
 
+// ── Booking types ───────────────────────────────────────────────────────────
+
+interface VehicleOption {
+  id: string; name: string; icon: string | null; img: string | null
+  fareMin: number; fareMax: number; fare: number
+  eta: number; safetyScore: number; model: string
+}
+
+interface DriverDetails {
+  name: string; initials: string
+  rating: number; vehicleNumber: string; model: string
+}
+
+type BookingStep = "select" | "assigning" | "assigned" | "riding"
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const SIM_STEP = 0.0003
@@ -51,6 +67,43 @@ const RISK_BASE_INCREASE = 5    // base score increase per tick while outside
 const RISK_TIME_FACTOR   = 0.8  // extra score per consecutive tick outside
 const RISK_DIST_FACTOR   = 12   // extra score per km from route line
 const RISK_CAP_PER_TICK  = 30   // max score increase in a single tick
+
+// ── Booking catalog ─────────────────────────────────────────────────────────
+
+const VEHICLE_CATALOG = [
+  { id: "mini",    name: "Mini",    icon: null,         img: "/mini.png",   fareMin: 80,  fareMax: 150, model: "Maruti Alto / WagonR" },
+  { id: "sedan",   name: "Sedan",   icon: null,         img: "/sedan.png",  fareMin: 120, fareMax: 200, model: "Honda City / Dzire"   },
+  { id: "suv",     name: "SUV",     icon: null,         img: "/suv.png",    fareMin: 180, fareMax: 280, model: "Innova Crysta"        },
+  { id: "premium", name: "Premium", icon: null,         img: "/premium.png", fareMin: 280, fareMax: 450, model: "Tesla Model 3"        },
+]
+const DRIVER_POOL = [
+  { name: "Ravi Kumar",   initials: "RK" },
+  { name: "Suresh Patel", initials: "SP" },
+  { name: "Amit Singh",   initials: "AS" },
+  { name: "Mohammed Ali", initials: "MA" },
+  { name: "Karthik Nair", initials: "KN" },
+]
+const PLATES = ["MH 12 AB 4567", "KA 09 CD 8901", "DL 7C 2345 JK", "TN 22 EF 7890"]
+
+function makeVehicleOptions(): VehicleOption[] {
+  return VEHICLE_CATALOG.map(v => ({
+    ...v,
+    fare:        Math.floor(v.fareMin + Math.random() * (v.fareMax - v.fareMin)),
+    eta:         2 + Math.floor(Math.random() * 7),
+    safetyScore: 75 + Math.floor(Math.random() * 21),
+  }))
+}
+
+function makeDriver(v: VehicleOption): DriverDetails {
+  const d = DRIVER_POOL[Math.floor(Math.random() * DRIVER_POOL.length)]
+  return {
+    name:          d.name,
+    initials:      d.initials,
+    rating:        Math.round((4.1 + Math.random() * 0.8) * 10) / 10,
+    vehicleNumber: PLATES[Math.floor(Math.random() * PLATES.length)],
+    model:         v.model,
+  }
+}
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -77,6 +130,25 @@ function isInsideCorridor(polygon: Feature<Polygon>, lat: number, lng: number): 
   return turf.booleanPointInPolygon(turf.point([lng, lat]), polygon)
 }
 
+/** Fetch a real driving route from the free OSRM demo server. Returns ordered [lat,lng] waypoints. */
+async function fetchOsrmRoute(start: Coord, dest: Coord): Promise<Coord[]> {
+  try {
+    const url =
+      `https://router.project-osrm.org/route/v1/driving/` +
+      `${start.lng},${start.lat};${dest.lng},${dest.lat}` +
+      `?overview=full&geometries=geojson`
+    const res  = await fetch(url, { signal: AbortSignal.timeout(8000) })
+    if (!res.ok) return []
+    const data = await res.json()
+    if (data.code !== "Ok" || !data.routes?.[0]) return []
+    return (data.routes[0].geometry.coordinates as [number, number][]).map(
+      ([lng, lat]) => ({ lat, lng })
+    )
+  } catch {
+    return []
+  }
+}
+
 // ── Component ──────────────────────────────────────────────────────────────
 
 export default function CabPage() {
@@ -97,6 +169,18 @@ export default function CabPage() {
   const [riskScore, setRiskScore]           = useState(0)
   const [demoOpen, setDemoOpen]             = useState(false)
   const [demoOffline, setDemoOffline]       = useState(false)
+  const [routeCoords, setRouteCoords]       = useState<Coord[]>([])
+  const [fetchingRoute, setFetchingRoute]   = useState(false)
+
+  // ── Booking state ────────────────────────────────────────────────────────
+  const [bookingStep, setBookingStep]         = useState<BookingStep>(() => {
+    const s = loadTrip()
+    return (s?.status === "ACTIVE" || s?.status === "ALERT") ? "riding" : "select"
+  })
+  const [vehicleOptions, setVehicleOptions]   = useState<VehicleOption[]>(() => makeVehicleOptions())
+  const [selectedVehicle, setSelectedVehicle] = useState<VehicleOption | null>(null)
+  const [driverDetails, setDriverDetails]     = useState<DriverDetails | null>(null)
+  const [etaCountdown, setEtaCountdown]       = useState(0)
 
   // ── Relay / offline state ────────────────────────────────────────────────
   const [isOnline, setIsOnline] = useState(navigator.onLine)
@@ -114,6 +198,7 @@ export default function CabPage() {
   const polylineRef = useRef<L.Polyline | null>(null)
   const routeLineRef = useRef<L.Polyline | null>(null)
   const bufferLayerRef = useRef<L.GeoJSON | null>(null)
+  const tileLayerRef = useRef<L.TileLayer | null>(null)
 
   // Logic refs
   const watchIdRef = useRef<number | null>(null)
@@ -129,6 +214,8 @@ export default function CabPage() {
   const timeOutsideRef   = useRef(0)
   const demoRampRef      = useRef<ReturnType<typeof setInterval> | null>(null)
   const demoOfflineRef   = useRef(false)
+  const routeCoordsRef   = useRef<Coord[]>([])
+  const simRouteIdxRef   = useRef(0)
 
   // Relay refs
   const relayLayerRef    = useRef<L.LayerGroup | null>(null)
@@ -154,6 +241,21 @@ export default function CabPage() {
       window.removeEventListener("offline", goOffline)
     }
   }, [])
+
+  // ── Booking countdown ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (bookingStep !== "assigning") return
+    const init = 5 + Math.floor(Math.random() * 4)   // 5–8 s
+    setEtaCountdown(init)
+    let rem = init
+    const id = setInterval(() => {
+      rem -= 1
+      setEtaCountdown(rem)
+      if (rem <= 0) { clearInterval(id); setBookingStep("assigned") }
+    }, 1000)
+    return () => clearInterval(id)
+  }, [bookingStep])
 
   // ── Clear relay layer helper ──────────────────────────────────────────────
 
@@ -241,11 +343,16 @@ export default function CabPage() {
 
   // ── Corridor (useMemo) ────────────────────────────────────────────────────
 
-  const corridor = useMemo(
-    () => buildCorridor(trip?.startLocation ?? null, destination),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [trip?.startLocation?.lat, trip?.startLocation?.lng, destination?.lat, destination?.lng]
-  )
+  const corridor = useMemo(() => {
+    // Prefer OSRM route polyline for a more accurate corridor
+    if (routeCoords.length >= 2) {
+      const line = turf.lineString(routeCoords.map(c => [c.lng, c.lat]))
+      return turf.buffer(line, CORRIDOR_RADIUS_KM, { units: "kilometers" }) as Feature<Polygon>
+    }
+    // Fallback: straight line between start and dest (while OSRM loads)
+    return buildCorridor(trip?.startLocation ?? null, destination)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeCoords, trip?.startLocation?.lat, trip?.startLocation?.lng, destination?.lat, destination?.lng])
 
   useEffect(() => {
     corridorRef.current = corridor
@@ -260,16 +367,25 @@ export default function CabPage() {
     }).addTo(map)
 
     if (routeLineRef.current) { routeLineRef.current.remove(); routeLineRef.current = null }
-    if (trip?.startLocation && destination) {
+
+    if (routeCoords.length >= 2) {
+      // Draw actual OSRM road route
+      const lls = routeCoords.map(c => [c.lat, c.lng] as L.LatLngTuple)
+      routeLineRef.current = L.polyline(lls, {
+        color: "#a78bfa", weight: 4, opacity: 0.9,
+      }).addTo(map)
+      // Fit map to the real route bounds
+      try { map.fitBounds(routeLineRef.current.getBounds(), { padding: [60, 60] }) } catch { /* ignore */ }
+    } else if (trip?.startLocation && destination) {
+      // Fallback straight-line while OSRM loads (dashed)
       const startPt = [trip.startLocation.lat, trip.startLocation.lng] as L.LatLngTuple
       const destPt  = [destination.lat, destination.lng] as L.LatLngTuple
-      console.log("[CabPage] Route line — start:", startPt, "dest:", destPt)
       routeLineRef.current = L.polyline([startPt, destPt],
-        { color: "#a78bfa", weight: 2, dashArray: "6 6", opacity: 0.7 }
+        { color: "#a78bfa", weight: 2, dashArray: "6 6", opacity: 0.6 }
       ).addTo(map)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [corridor])
+  }, [corridor, routeCoords])
 
   // ── Nav scroll ────────────────────────────────────────────────────────────
 
@@ -285,10 +401,11 @@ export default function CabPage() {
     if (!mapRef.current || mapInstanceRef.current) return
 
     const map = L.map(mapRef.current, { zoomControl: false }).setView([20.5937, 78.9629], 5)
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    const tl = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
       maxZoom: 19,
     }).addTo(map)
+    tileLayerRef.current = tl
     L.control.zoom({ position: "bottomright" }).addTo(map)
 
     const marker = L.circleMarker([20.5937, 78.9629], {
@@ -318,6 +435,7 @@ export default function CabPage() {
       mapInstanceRef.current = null
       markerRef.current = null
       relayLayerRef.current = null
+      tileLayerRef.current  = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -327,6 +445,40 @@ export default function CabPage() {
     window.addEventListener("resize", onResize)
     return () => window.removeEventListener("resize", onResize)
   }, [])
+
+  // ── Offline map mode ──────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map) return
+    const container = map.getContainer()
+
+    if (!isOnline) {
+      // Strip tile layer → dark void background
+      if (tileLayerRef.current && map.hasLayer(tileLayerRef.current)) {
+        tileLayerRef.current.remove()
+      }
+      container.style.backgroundColor = "#0f0f14"
+      // Lock interactions for dramatic effect
+      map.dragging.disable()
+      map.touchZoom.disable()
+      map.doubleClickZoom.disable()
+      map.scrollWheelZoom.disable()
+      map.keyboard.disable()
+    } else {
+      // Restore tile layer
+      if (tileLayerRef.current && !map.hasLayer(tileLayerRef.current)) {
+        tileLayerRef.current.addTo(map)
+      }
+      container.style.backgroundColor = ""
+      // Re-enable all interactions
+      map.dragging.enable()
+      map.touchZoom.enable()
+      map.doubleClickZoom.enable()
+      map.scrollWheelZoom.enable()
+      map.keyboard.enable()
+    }
+  }, [isOnline])
 
   // ── Destination click handler ─────────────────────────────────────────────
 
@@ -354,6 +506,39 @@ export default function CabPage() {
     map.on("click", onClick)
     return () => { map.off("click", onClick) }
   }, [])
+
+  // ── OSRM route fetch ──────────────────────────────────────────────────────
+
+  useEffect(() => {
+    const start = tripRef.current?.startLocation
+    if (!destination || !start) return
+
+    let cancelled = false
+    setFetchingRoute(true)
+
+    fetchOsrmRoute(start, destination).then(coords => {
+      if (cancelled) return
+      setFetchingRoute(false)
+      if (coords.length >= 2) {
+        // Find nearest route point to current sim position so sim starts from there
+        const cur = simPosRef.current
+        let nearest = 0, minDist = Infinity
+        coords.forEach((c, i) => {
+          const d = (c.lat - cur.lat) ** 2 + (c.lng - cur.lng) ** 2
+          if (d < minDist) { minDist = d; nearest = i }
+        })
+        simRouteIdxRef.current = nearest
+        routeCoordsRef.current = coords
+        setRouteCoords(coords)
+      } else {
+        // OSRM unavailable — keep straight-line fallback silently
+        setFetchingRoute(false)
+      }
+    })
+
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destination?.lat, destination?.lng])
 
   useEffect(() => {
     const id = setTimeout(() => mapInstanceRef.current?.invalidateSize(), 120)
@@ -584,32 +769,45 @@ export default function CabPage() {
     setSimActive(true)
 
     simIntervalRef.current = setInterval(() => {
-      const cur = simPosRef.current
-      const dest = destinationRef.current
+      const rCoords = routeCoordsRef.current
 
-      if (dest) {
-        const deltaLat = dest.lat - cur.lat
-        const deltaLng = dest.lng - cur.lng
-        const distance = Math.sqrt(deltaLat * deltaLat + deltaLng * deltaLng)
-
-        if (distance < SIM_ARRIVE_THRESHOLD) {
-          pushCoord(dest.lat, dest.lng, "#2563EB")
-          if (simIntervalRef.current !== null) {
-            clearInterval(simIntervalRef.current)
-            simIntervalRef.current = null
-          }
+      if (rCoords.length >= 2) {
+        // ── Road-following mode: walk OSRM waypoints ──────────────────────
+        const idx = simRouteIdxRef.current
+        if (idx >= rCoords.length) {
+          // Reached end of route
+          clearInterval(simIntervalRef.current!)
+          simIntervalRef.current = null
           setSimActive(false)
           return
         }
-
-        const jitter = () => (Math.random() * 0.00004 - 0.00002)
-        pushCoord(
-          cur.lat + (deltaLat / distance) * SIM_STEP + jitter(),
-          cur.lng + (deltaLng / distance) * SIM_STEP + jitter(),
-          "#2563EB"
-        )
+        const pt = rCoords[idx]
+        pushCoord(pt.lat, pt.lng, "#2563EB")
+        simRouteIdxRef.current = idx + 1
       } else {
-        pushCoord(cur.lat, cur.lng, "#2563EB")
+        // ── Fallback: vector movement toward destination ───────────────────
+        const cur  = simPosRef.current
+        const dest = destinationRef.current
+        if (dest) {
+          const deltaLat = dest.lat - cur.lat
+          const deltaLng = dest.lng - cur.lng
+          const distance = Math.sqrt(deltaLat * deltaLat + deltaLng * deltaLng)
+          if (distance < SIM_ARRIVE_THRESHOLD) {
+            pushCoord(dest.lat, dest.lng, "#2563EB")
+            clearInterval(simIntervalRef.current!)
+            simIntervalRef.current = null
+            setSimActive(false)
+            return
+          }
+          const jitter = () => (Math.random() * 0.00004 - 0.00002)
+          pushCoord(
+            cur.lat + (deltaLat / distance) * SIM_STEP + jitter(),
+            cur.lng + (deltaLng / distance) * SIM_STEP + jitter(),
+            "#2563EB"
+          )
+        } else {
+          pushCoord(cur.lat, cur.lng, "#2563EB")
+        }
       }
     }, 1500)
   }, [pushCoord])
@@ -649,10 +847,13 @@ export default function CabPage() {
     setDestination(null)
     setDeviationAlert(false)
     setRiskScore(0)
-    riskScoreRef.current  = 0
+    setRouteCoords([])
+    riskScoreRef.current   = 0
     timeOutsideRef.current = 0
     alertEmittedRef.current = false
-    keyPairRef.current = null
+    keyPairRef.current     = null
+    routeCoordsRef.current = []
+    simRouteIdxRef.current = 0
 
     generateKeyPair().then((kp) => { keyPairRef.current = kp })
 
@@ -678,6 +879,7 @@ export default function CabPage() {
 
       setAwaitingDest(true)
 
+      setBookingStep("riding")
       if (simMode) startSimulation(); else startWatch()
     } catch (e: unknown) {
       const code = (e as GeolocationPositionError).code ?? 0
@@ -696,8 +898,15 @@ export default function CabPage() {
     setTrip(completed); saveTrip(completed); tripRef.current = completed
     setDeviationAlert(false)
     setRiskScore(0)
+    setRouteCoords([])
+    setBookingStep("select")
+    setSelectedVehicle(null)
+    setDriverDetails(null)
+    setVehicleOptions(makeVehicleOptions())
     riskScoreRef.current   = 0
     timeOutsideRef.current = 0
+    routeCoordsRef.current = []
+    simRouteIdxRef.current = 0
     clearRelay()
     setTransmitStatus("idle")
     markerRef.current?.bindPopup("<b>Trip Ended</b>").openPopup()
@@ -705,6 +914,14 @@ export default function CabPage() {
       try { mapInstanceRef.current.fitBounds(polylineRef.current.getBounds(), { padding: [60, 60] }) } catch { /* short */ }
     }
   }, [stopWatch, stopSimulation, clearRelay])
+
+  // ── Confirm Ride ──────────────────────────────────────────────────────────
+
+  const handleConfirmRide = useCallback(() => {
+    if (!selectedVehicle) return
+    setDriverDetails(makeDriver(selectedVehicle))
+    setBookingStep("assigning")
+  }, [selectedVehicle])
 
   useEffect(() => {
     getSocket()
@@ -885,6 +1102,46 @@ export default function CabPage() {
       <div className="flex-1 relative">
         <div ref={mapRef} className="absolute inset-0 z-0" />
 
+        {/* Offline grid overlay — shown instead of tiles */}
+        <AnimatePresence>
+          {!isOnline && (
+            <motion.div
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              transition={{ duration: 0.6 }}
+              className="absolute inset-0 z-[1] pointer-events-none"
+              style={{
+                backgroundImage: `
+                  linear-gradient(rgba(124,58,237,0.07) 1px, transparent 1px),
+                  linear-gradient(90deg, rgba(124,58,237,0.07) 1px, transparent 1px),
+                  linear-gradient(rgba(124,58,237,0.03) 1px, transparent 1px),
+                  linear-gradient(90deg, rgba(124,58,237,0.03) 1px, transparent 1px)
+                `,
+                backgroundSize: "80px 80px, 80px 80px, 20px 20px, 20px 20px",
+              }}
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Offline Secure Mode banner */}
+        <AnimatePresence>
+          {!isOnline && relayPhase === "idle" && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
+              className={`absolute left-0 right-0 z-[1048] ${deviationAlert ? "top-12" : "top-0"}`}>
+              <motion.div
+                animate={{ opacity: [0.85, 1, 0.85] }} transition={{ repeat: Infinity, duration: 2.5 }}
+                className="flex items-center justify-center gap-3 px-6 py-2.5 text-sm font-bold text-white"
+                style={{ background: "linear-gradient(90deg,#312e81,#4f46e5,#312e81)", boxShadow: "0 4px 20px rgba(79,70,229,0.45)" }}>
+                <motion.div
+                  animate={{ scale: [1, 1.15, 1] }} transition={{ repeat: Infinity, duration: 1.8 }}>
+                  <WifiOff className="w-4 h-4" />
+                </motion.div>
+                ⚡ Offline Secure Mode — Relay Enabled · Map tiles suspended
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Deviation alert banner */}
         <AnimatePresence>
           {deviationAlert && (
@@ -907,7 +1164,7 @@ export default function CabPage() {
           {relayPhase !== "idle" && (
             <motion.div
               initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }}
-              className={`absolute left-0 right-0 z-[1049] ${deviationAlert ? "top-12" : "top-0"}`}>
+              className={`absolute left-0 right-0 z-[1049] ${deviationAlert && !isOnline ? "top-24" : deviationAlert ? "top-12" : !isOnline ? "top-10" : "top-0"}`}>
               <motion.div
                 animate={{ opacity: [0.88, 1, 0.88] }} transition={{ repeat: Infinity, duration: 1.6 }}
                 className="flex items-center justify-center gap-3 px-6 py-2.5 text-sm font-bold text-white"
@@ -1066,12 +1323,27 @@ export default function CabPage() {
                 Simulation Active
               </motion.div>
             )}
-            {destination && isRunning && (
+            {destination && isRunning && fetchingRoute && (
               <motion.div initial={{ opacity: 0, scale: 0.85 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
-                className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#18181B]/90 backdrop-blur-md border border-emerald-500/40 text-emerald-400 text-xs font-semibold shadow-xl whitespace-nowrap">
-                <div className="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0" />
+                className="flex items-center gap-2 px-4 py-2 rounded-full bg-[#18181B]/90 backdrop-blur-md border border-purple-500/40 text-purple-400 text-xs font-semibold shadow-xl whitespace-nowrap">
+                <Loader2 className="w-3.5 h-3.5 flex-shrink-0 animate-spin" />
+                Fetching road route…
+              </motion.div>
+            )}
+            {destination && isRunning && !fetchingRoute && (
+              <motion.div
+                key={routeCoords.length > 0 ? "road" : "straight"}
+                initial={{ opacity: 0, scale: 0.85 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-full bg-[#18181B]/90 backdrop-blur-md text-xs font-semibold shadow-xl whitespace-nowrap ${
+                  routeCoords.length > 0
+                    ? "border border-emerald-500/40 text-emerald-400"
+                    : "border border-yellow-500/40 text-yellow-400"
+                }`}>
+                <div className={`w-2 h-2 rounded-full flex-shrink-0 ${routeCoords.length > 0 ? "bg-emerald-400" : "bg-yellow-400"}`} />
                 <MapPin className="w-3.5 h-3.5 flex-shrink-0" />
-                Corridor Active — 300 m buffer
+                {routeCoords.length > 0
+                  ? `Road Route — ${routeCoords.length} waypoints`
+                  : "Corridor Active — straight line"}
               </motion.div>
             )}
             {isRunning && riskScore > 0 && (
@@ -1107,6 +1379,9 @@ export default function CabPage() {
                 onClick={() => {
                   if (destination) {
                     setDestination(null)
+                    setRouteCoords([])
+                    routeCoordsRef.current = []
+                    simRouteIdxRef.current = 0
                     if (destMarkerRef.current) { destMarkerRef.current.remove(); destMarkerRef.current = null }
                     if (bufferLayerRef.current) { bufferLayerRef.current.remove(); bufferLayerRef.current = null }
                     if (routeLineRef.current) { routeLineRef.current.remove(); routeLineRef.current = null }
@@ -1319,7 +1594,7 @@ export default function CabPage() {
           {isRunning && (
             <motion.div
               initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }}
-              className="absolute bottom-24 right-4 z-[1000] w-48 rounded-2xl overflow-hidden shadow-2xl"
+              className="absolute bottom-36 right-4 z-[1000] w-48 rounded-2xl overflow-hidden shadow-2xl"
               style={{ background: "rgba(18,18,22,0.92)", backdropFilter: "blur(14px)", border: `1px solid ${riskColor}40` }}>
               {/* Header */}
               <div className="flex items-center justify-between px-4 pt-3 pb-1">
@@ -1391,28 +1666,286 @@ export default function CabPage() {
           )}
         </AnimatePresence>
 
-        {/* Start / End Ride */}
-        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000]">
-          <AnimatePresence mode="wait">
-            {!isRunning ? (
-              <motion.button key="start" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}
-                onClick={handleStartRide} disabled={startingRide}
-                className="flex items-center gap-2.5 px-8 py-3.5 rounded-2xl font-semibold text-white text-sm shadow-2xl disabled:opacity-60"
-                style={{ background: simMode ? "linear-gradient(135deg,#2563EB,#1d4ed8)" : "linear-gradient(135deg,#7C3AED,#2563EB)", boxShadow: simMode ? "0 0 30px rgba(37,99,235,0.5)" : "0 0 30px rgba(124,58,237,0.5)" }}>
-                {startingRide ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-white" />}
-                {startingRide ? "Starting…" : simMode ? "Start Sim Ride" : "Start Ride"}
-              </motion.button>
-            ) : (
-              <motion.button key="end" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}
+        {/* End Ride button (visible only while trip is running) */}
+        <AnimatePresence>
+          {isRunning && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}
+              className="absolute bottom-6 left-1/2 -translate-x-1/2 z-[1000]">
+              <button
                 onClick={handleEndRide}
                 className="flex items-center gap-2.5 px-8 py-3.5 rounded-2xl font-semibold text-white text-sm shadow-2xl"
                 style={{ background: "linear-gradient(135deg,#dc2626,#991b1b)", boxShadow: "0 0 24px rgba(220,38,38,0.5)" }}>
                 <Square className="w-4 h-4 fill-white" />
                 End Ride
-              </motion.button>
-            )}
-          </AnimatePresence>
-        </div>
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* ── Booking Panel (bottom-sheet, hidden during active trip) ── */}
+        <AnimatePresence>
+          {!isRunning && (
+            <motion.div
+              key={bookingStep}
+              initial={{ y: "100%" }} animate={{ y: 0 }} exit={{ y: "100%" }}
+              transition={{ type: "spring", damping: 28, stiffness: 260 }}
+              className="absolute bottom-0 left-0 right-0 z-[1010] rounded-t-3xl overflow-hidden"
+              style={{ background: "rgba(10,10,15,0.97)", backdropFilter: "blur(24px)", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+
+              {/* Drag handle */}
+              <div className="flex justify-center pt-3 pb-1">
+                <div className="w-9 h-1 rounded-full bg-white/15" />
+              </div>
+
+              {/* ── STEP: select ── */}
+              {bookingStep === "select" && (
+                <div>
+                  <div className="px-5 pt-2 pb-3">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-white font-bold text-base">Choose a ride</h3>
+                        <p className="text-[#A1A1AA] text-xs mt-0.5">Select vehicle type to continue</p>
+                      </div>
+                      <Car className="w-5 h-5 text-[#7C3AED]" />
+                    </div>
+                  </div>
+
+                  {/* Vehicle cards 2×2 */}
+                  <div className="px-4 grid grid-cols-2 gap-2.5">
+                    {vehicleOptions.map(v => (
+                      <motion.button
+                        key={v.id}
+                        onClick={() => setSelectedVehicle(v)}
+                        whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.97 }}
+                        className={`relative p-3.5 rounded-2xl text-left transition-all ${
+                          selectedVehicle?.id === v.id
+                            ? "border-2 border-[#7C3AED]"
+                            : "border border-white/10 hover:border-white/20"
+                        }`}
+                        style={
+                          selectedVehicle?.id === v.id
+                            ? { background: "rgba(124,58,237,0.15)", boxShadow: "0 0 22px rgba(124,58,237,0.3)" }
+                            : { background: "rgba(255,255,255,0.04)" }
+                        }>
+                        {/* Checkmark badge */}
+                        <AnimatePresence>
+                          {selectedVehicle?.id === v.id && (
+                            <motion.div
+                              initial={{ scale: 0 }} animate={{ scale: 1 }} exit={{ scale: 0 }}
+                              className="absolute top-2.5 right-2.5 w-4 h-4 rounded-full bg-[#7C3AED] flex items-center justify-center">
+                              <span className="text-[9px] text-white font-bold">✓</span>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+
+                        {v.img
+                          ? <img
+                              src={v.img} alt={v.name}
+                              className="h-12 w-auto object-contain mb-1"
+                              style={{
+                                maskImage: "radial-gradient(ellipse 88% 82% at 52% 52%, black 38%, transparent 82%)",
+                                WebkitMaskImage: "radial-gradient(ellipse 88% 82% at 52% 52%, black 38%, transparent 82%)",
+                                filter: v.id === "suv"
+                                  ? "drop-shadow(0 2px 8px rgba(220,38,38,0.5)) brightness(1.1)"
+                                  : v.id === "premium"
+                                  ? "drop-shadow(0 2px 8px rgba(124,58,237,0.5)) brightness(1.05)"
+                                  : v.id === "mini"
+                                  ? "drop-shadow(0 2px 6px rgba(180,50,50,0.4)) brightness(1.1) saturate(1.2)"
+                                  : "drop-shadow(0 2px 6px rgba(37,99,235,0.4)) brightness(1.05)",
+                              }}
+                            />
+                          : <div className="text-2xl mb-2">{v.icon}</div>
+                        }
+                        <div className="text-white font-bold text-sm">{v.name}</div>
+                        <div className="text-[#7C3AED] font-bold text-sm">₹{v.fare}</div>
+
+                        <div className="mt-2 flex flex-col gap-1">
+                          <div className="flex items-center gap-1 text-[#A1A1AA] text-[10px]">
+                            <Clock className="w-2.5 h-2.5 flex-shrink-0" />
+                            {v.eta} min away
+                          </div>
+                          <div className="flex items-center gap-1 text-[10px]">
+                            <Shield className="w-2.5 h-2.5 flex-shrink-0 text-emerald-400" />
+                            <span className="text-emerald-400">{v.safetyScore}% safe</span>
+                          </div>
+                          <div className="text-[9px] text-[#52525B] truncate">{v.model}</div>
+                        </div>
+                      </motion.button>
+                    ))}
+                  </div>
+
+                  {/* Confirm button */}
+                  <div className="px-4 pt-3 pb-6">
+                    <motion.button
+                      onClick={handleConfirmRide}
+                      disabled={!selectedVehicle}
+                      whileHover={selectedVehicle ? { scale: 1.01 } : {}}
+                      whileTap={selectedVehicle ? { scale: 0.98 } : {}}
+                      className={`w-full py-3.5 rounded-2xl font-bold text-sm transition-all ${
+                        selectedVehicle
+                          ? "text-white"
+                          : "bg-white/5 border border-white/10 text-[#52525B] cursor-not-allowed"
+                      }`}
+                      style={selectedVehicle ? {
+                        background: "linear-gradient(135deg,#7C3AED,#2563EB)",
+                        boxShadow: "0 0 28px rgba(124,58,237,0.45)",
+                      } : {}}>
+                      {selectedVehicle
+                        ? `Confirm ${selectedVehicle.name} — ₹${selectedVehicle.fare}`
+                        : "Select a vehicle to continue"}
+                    </motion.button>
+                  </div>
+                </div>
+              )}
+
+              {/* ── STEP: assigning ── */}
+              {bookingStep === "assigning" && (
+                <div className="flex flex-col items-center py-10 gap-4 px-5">
+                  <div className="relative">
+                    <motion.div
+                      animate={{ rotate: 360 }}
+                      transition={{ repeat: Infinity, duration: 2.2, ease: "linear" }}
+                      className="w-20 h-20 rounded-full"
+                      style={{ border: "3px solid rgba(124,58,237,0.2)", borderTop: "3px solid #7C3AED" }}
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      {selectedVehicle?.img
+                        ? <img
+                            src={selectedVehicle.img} alt={selectedVehicle.name}
+                            className="h-9 w-auto object-contain"
+                            style={{
+                              maskImage: "radial-gradient(ellipse 88% 82% at 52% 52%, black 38%, transparent 82%)",
+                              WebkitMaskImage: "radial-gradient(ellipse 88% 82% at 52% 52%, black 38%, transparent 82%)",
+                              filter: selectedVehicle.id === "suv"
+                                ? "drop-shadow(0 2px 8px rgba(220,38,38,0.5)) brightness(1.1)"
+                                : selectedVehicle.id === "premium"
+                                ? "drop-shadow(0 2px 8px rgba(124,58,237,0.5)) brightness(1.05)"
+                                : selectedVehicle.id === "mini"
+                                ? "drop-shadow(0 2px 6px rgba(180,50,50,0.4)) brightness(1.1) saturate(1.2)"
+                                : "drop-shadow(0 2px 6px rgba(37,99,235,0.4)) brightness(1.05)",
+                            }}
+                          />
+                        : <span className="text-2xl">{selectedVehicle?.icon}</span>
+                      }
+                    </div>
+                  </div>
+
+                  <div className="text-center">
+                    <div className="text-white font-bold text-lg">Finding your driver…</div>
+                    <div className="text-[#A1A1AA] text-sm mt-1">
+                      Matching with nearest {selectedVehicle?.name}
+                    </div>
+                  </div>
+
+                  <div className="flex items-end gap-1.5">
+                    <motion.span
+                      key={etaCountdown}
+                      initial={{ opacity: 0, scale: 1.4 }} animate={{ opacity: 1, scale: 1 }}
+                      className="text-5xl font-black text-white tabular-nums">
+                      {etaCountdown}
+                    </motion.span>
+                    <span className="text-[#A1A1AA] text-sm pb-2">sec</span>
+                  </div>
+
+                  {/* Pulse dots */}
+                  <div className="flex gap-2">
+                    {[0, 1, 2].map(i => (
+                      <motion.div key={i}
+                        animate={{ opacity: [0.2, 1, 0.2], scale: [0.8, 1, 0.8] }}
+                        transition={{ repeat: Infinity, duration: 1.2, delay: i * 0.4 }}
+                        className="w-2 h-2 rounded-full bg-[#7C3AED]" />
+                    ))}
+                  </div>
+                  <div className="pb-2" />
+                </div>
+              )}
+
+              {/* ── STEP: assigned ── */}
+              {bookingStep === "assigned" && driverDetails && (
+                <div className="px-5 pt-3 pb-6">
+                  {/* Title */}
+                  <div className="flex items-center gap-2 mb-4">
+                    <motion.div
+                      initial={{ scale: 0 }} animate={{ scale: 1 }}
+                      transition={{ type: "spring", stiffness: 260, damping: 18 }}>
+                      <UserCheck className="w-5 h-5 text-emerald-400" />
+                    </motion.div>
+                    <span className="text-emerald-400 font-bold text-sm">Driver Assigned</span>
+                  </div>
+
+                  {/* Driver card */}
+                  <div className="flex items-center gap-3 p-3.5 rounded-2xl mb-3"
+                    style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" }}>
+                    {/* Avatar */}
+                    <div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-bold text-base flex-shrink-0"
+                      style={{ background: "linear-gradient(135deg,#7C3AED,#2563EB)" }}>
+                      {driverDetails.initials}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-white font-bold text-sm">{driverDetails.name}</div>
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <Star className="w-3 h-3 text-yellow-400 fill-yellow-400 flex-shrink-0" />
+                        <span className="text-yellow-400 text-xs font-semibold">{driverDetails.rating}</span>
+                        <span className="text-[#52525B] text-xs">·</span>
+                        <span className="text-[#A1A1AA] text-xs truncate">{driverDetails.vehicleNumber}</span>
+                      </div>
+                      <div className="text-[#52525B] text-[10px] mt-0.5 truncate">{driverDetails.model}</div>
+                    </div>
+                    <div className="flex-shrink-0">
+                      {selectedVehicle?.img
+                        ? <img
+                            src={selectedVehicle.img} alt={selectedVehicle.name}
+                            className="h-9 w-auto object-contain"
+                            style={{
+                              maskImage: "radial-gradient(ellipse 88% 82% at 52% 52%, black 38%, transparent 82%)",
+                              WebkitMaskImage: "radial-gradient(ellipse 88% 82% at 52% 52%, black 38%, transparent 82%)",
+                              filter: selectedVehicle.id === "suv"
+                                ? "drop-shadow(0 2px 8px rgba(220,38,38,0.5)) brightness(1.1)"
+                                : selectedVehicle.id === "premium"
+                                ? "drop-shadow(0 2px 8px rgba(124,58,237,0.5)) brightness(1.05)"
+                                : selectedVehicle.id === "mini"
+                                ? "drop-shadow(0 2px 6px rgba(180,50,50,0.4)) brightness(1.1) saturate(1.2)"
+                                : "drop-shadow(0 2px 6px rgba(37,99,235,0.4)) brightness(1.05)",
+                            }}
+                          />
+                        : <span className="text-2xl">{selectedVehicle?.icon}</span>
+                      }
+                    </div>
+                  </div>
+
+                  {/* ETA banner */}
+                  <div className="flex items-center gap-2 p-3 rounded-xl mb-4"
+                    style={{ background: "rgba(16,185,129,0.1)", border: "1px solid rgba(16,185,129,0.25)" }}>
+                    <motion.div animate={{ opacity: [0.4, 1, 0.4] }} transition={{ repeat: Infinity, duration: 1.5 }}
+                      className="w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0" />
+                    <Clock className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+                    <span className="text-emerald-400 text-xs font-semibold">
+                      Arriving in {selectedVehicle?.eta} min · ₹{selectedVehicle?.fare}
+                    </span>
+                  </div>
+
+                  {/* Start Ride */}
+                  <motion.button
+                    onClick={handleStartRide}
+                    disabled={startingRide}
+                    whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.98 }}
+                    className="w-full py-3.5 rounded-2xl font-bold text-white text-sm disabled:opacity-60 flex items-center justify-center gap-2"
+                    style={{
+                      background: simMode ? "linear-gradient(135deg,#2563EB,#1d4ed8)" : "linear-gradient(135deg,#7C3AED,#2563EB)",
+                      boxShadow: "0 0 28px rgba(124,58,237,0.45)",
+                    }}>
+                    {startingRide
+                      ? <><Loader2 className="w-4 h-4 animate-spin" /> Starting…</>
+                      : <><Play className="w-4 h-4 fill-white" />{simMode ? "Start Sim Ride" : "Start Ride"}</>
+                    }
+                  </motion.button>
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
       </div>
     </div>
   )
