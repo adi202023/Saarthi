@@ -1,5 +1,5 @@
 import { io, Socket } from "socket.io-client"
-import type { CabState } from "./geo"
+import type { CabState, TraceChainEntry, SilentAlert } from "./geo"
 
 const SERVER_URL = "http://localhost:4000"
 
@@ -49,6 +49,22 @@ class SocketManager {
 
   onCabLeft(cb: (cabId: string) => void) {
     getSocket().on("cab_left", cb)
+  }
+
+  onTraceChainUpdate(cb: (data: { cabId: string; chain: TraceChainEntry[] }) => void) {
+    getSocket().on("trace_chain_update", cb)
+  }
+
+  onPredictedIncoming(cb: (data: CabState & { cabId: string; type: string; etaSeconds?: number }) => void) {
+    getSocket().on("predicted_incoming", cb)
+  }
+
+  onSilentAlert(cb: (alert: SilentAlert) => void) {
+    getSocket().on("silent_alert", cb)
+  }
+
+  onAlertBufferSynced(cb: (alerts: SilentAlert[]) => void) {
+    getSocket().on("alert_buffer_synced", cb)
   }
 
   emitCabPosition(cabId: string, lat: number, lon: number) {

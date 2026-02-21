@@ -15,10 +15,38 @@ export interface CabState {
   lat: number
   lon: number
   stationId: string
+  stationName?: string
   tripToken: string
   insideRadius: boolean
   lastUpdate: number
   cabId?: string
+  riskScore?: number
+  predictedNextStationId?: string | null
+  predictedNextStationName?: string | null
+  isAlert?: boolean
+  distressTriggers?: string[]
+}
+
+export interface TraceChainEntry {
+  stationId: string
+  stationName: string
+  timestamp: number
+  prevHash: string | null
+  hash: string | null
+}
+
+export interface SilentAlert {
+  id: string
+  cabId: string
+  lat: number
+  lon: number
+  stationId: string
+  riskScore: number
+  triggers: string[]
+  type: string
+  severity: string
+  timestamp: number
+  hash: string
 }
 
 export interface EmergencyAlert {

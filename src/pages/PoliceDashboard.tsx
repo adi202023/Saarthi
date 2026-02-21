@@ -11,10 +11,11 @@ import { ShieldCheck, ShieldX, ShieldAlert } from "lucide-react"
 const INITIAL_CENTER: [number, number] = [12.9716, 77.5946]
 const INITIAL_ZOOM = 11
 
+const API_BASE = "http://localhost:4000"
+
 type VerifyStatus = "pending" | "verified" | "invalid" | "unsigned" | null
 
 export default function PoliceDashboard() {
-  // ── Map refs ──────────────────────────────────────────────────────────────
   const mapRef            = useRef<L.Map | null>(null)
   const mapContainerRef   = useRef<HTMLDivElement>(null)
   const stationLayerRef   = useRef<L.LayerGroup>(new L.LayerGroup())
@@ -24,7 +25,6 @@ export default function PoliceDashboard() {
   const scanCircleRef     = useRef<L.Circle | null>(null)
   const gridLayerRef      = useRef<L.LayerGroup>(new L.LayerGroup())
 
-  // ── State ─────────────────────────────────────────────────────────────────
   const [stations,         setStations]         = useState<PoliceStation[]>([])
   const [selectedStation,  setSelectedStation]  = useState<string>("")
   const [cabs,             setCabs]             = useState<Map<string, CabState & { cabId: string }>>(new Map())
@@ -33,16 +33,18 @@ export default function PoliceDashboard() {
   const [selectedAlert,    setSelectedAlert]    = useState<PoliceAlertPayload | null>(null)
   const [verifyStatus,     setVerifyStatus]     = useState<VerifyStatus>(null)
   const [clockStr,         setClockStr]         = useState(new Date().toLocaleString())
+  const [traceChains,      setTraceChains]      = useState<Map<string, { stationId: string; stationName: string; timestamp: number }[]>>(new Map())
+  const [predictedIncoming, setPredictedIncoming] = useState<Array<{ cabId: string; stationName: string; type: string }>>([])
+  const [alertCabs,        setAlertCabs]        = useState<Set<string>>(new Set())
+  const [selectedCabForTrace, setSelectedCabForTrace] = useState<string | null>(null)
 
-  // Live clock
   useEffect(() => {
     const id = setInterval(() => setClockStr(new Date().toLocaleString()), 1000)
     return () => clearInterval(id)
   }, [])
 
-  // ── Fetch police stations ─────────────────────────────────────────────────
   useEffect(() => {
-    fetch("http://localhost:4000/api/stations")
+    fetch(`${API_BASE}/api/stations`)
       .then(r => r.json())
       .then((data: PoliceStation[]) => {
         setStations(data)
@@ -51,10 +53,8 @@ export default function PoliceDashboard() {
       .catch(console.error)
   }, [])
 
-  // ── Initialise Leaflet map ────────────────────────────────────────────────
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return
-
     const map = L.map(mapContainerRef.current, {
       center: INITIAL_CENTER,
       zoom: INITIAL_ZOOM,
@@ -63,13 +63,11 @@ export default function PoliceDashboard() {
       preferCanvas: true,
     })
 
-    // OpenStreetMap tiles (matches the tactical portal screenshot)
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       attribution: "",
       maxZoom: 19,
     }).addTo(map)
 
-    // Custom pane z-ordering
     const panes: [string, string][] = [
       ["grid", "400"], ["ranges", "500"], ["stations", "600"],
       ["cabs", "700"], ["scanning", "800"], ["alerts", "900"],
@@ -84,10 +82,8 @@ export default function PoliceDashboard() {
     cabLayerRef.current.addTo(map)
     alertLayerRef.current.addTo(map)
     gridLayerRef.current.addTo(map)
-
     mapRef.current = map
 
-    // ── Green tactical grid ──────────────────────────────────────────────
     const drawGrid = () => {
       if (!mapRef.current) return
       gridLayerRef.current.clearLayers()
@@ -98,7 +94,7 @@ export default function PoliceDashboard() {
       const latN = Math.ceil(bounds.getNorth()  / gs) * gs
       const lngW = Math.floor(bounds.getWest()  / gs) * gs
       const lngE = Math.ceil(bounds.getEast()   / gs) * gs
-      const lineOpts = { color: "#00ff00", weight: 0.5, opacity: 0.18, pane: "grid" }
+      const lineOpts = { color: "#999999", weight: 1, opacity: 0.35, pane: "grid" }
       for (let lng = lngW; lng <= lngE; lng += gs)
         gridLayerRef.current.addLayer(L.polyline([[latS, lng], [latN, lng]], lineOpts))
       for (let lat = latS; lat <= latN; lat += gs)
@@ -111,16 +107,13 @@ export default function PoliceDashboard() {
     return () => { map.remove(); mapRef.current = null }
   }, [])
 
-  // ── Draw station markers + range circles ─────────────────────────────────
   useEffect(() => {
     if (!mapRef.current || stations.length === 0) return
-
     stationLayerRef.current.clearLayers()
     rangeLayerRef.current.clearLayers()
 
     const group = new L.FeatureGroup()
     stations.forEach(s => {
-      // Marker
       const m = L.circleMarker([s.lat, s.lon], {
         radius: 8, fillColor: "#00ff00", color: "#ffffff",
         weight: 2, opacity: 1, fillOpacity: 0.8, pane: "stations",
@@ -128,13 +121,11 @@ export default function PoliceDashboard() {
       stationLayerRef.current.addLayer(m)
       group.addLayer(L.circleMarker([s.lat, s.lon], { radius: 1 }))
 
-      // Subtle 2 km range for all
       rangeLayerRef.current.addLayer(L.circle([s.lat, s.lon], {
         radius: 2000, fillColor: "#00ff00", color: "#00ff00",
         weight: 1, opacity: 0.25, fillOpacity: 0.05, pane: "ranges",
       }))
 
-      // Bold ring for selected
       if (s.id === selectedStation) {
         rangeLayerRef.current.addLayer(L.circle([s.lat, s.lon], {
           radius: 2000, fillColor: "#00ff00", color: "#00ff00",
@@ -142,10 +133,9 @@ export default function PoliceDashboard() {
         }))
       }
     })
-    try { mapRef.current.fitBounds(group.getBounds(), { padding: [20, 20] }) } catch {}
+    try { mapRef.current!.fitBounds(group.getBounds(), { padding: [20, 20] }) } catch {}
   }, [stations, selectedStation])
 
-  // ── Scanning pulse animation ──────────────────────────────────────────────
   useEffect(() => {
     const map = mapRef.current
     if (!map || !selectedStation || !isScanning) return
@@ -172,26 +162,23 @@ export default function PoliceDashboard() {
     }
   }, [selectedStation, stations, isScanning])
 
-  // ── Socket events (combined: emergency + cab tracking) ───────────────────
   useEffect(() => {
-    const socket = getSocket()
+    const sock = getSocket()
 
-    // Our emergency channel
     const onAlert = (data: PoliceAlertPayload) => {
       setAlerts(prev => [data, ...prev.slice(0, 49)])
-      if (mapRef.current) {
+      if (mapRef.current && data.payload?.location) {
         const { lat, lng } = data.payload.location
         L.circleMarker([lat, lng], {
           radius: 14, fillColor: "#ff0000", color: "#ff0000",
           weight: 2, fillOpacity: 0.55, pane: "alerts",
         })
-          .bindTooltip(`⚠ ${data.payload.tripId}`, { className: "alert-tooltip" })
+          .bindTooltip(`⚠ ${data.payload?.tripId ?? "ALERT"}`, { className: "alert-tooltip" })
           .addTo(alertLayerRef.current)
       }
     }
     const onHistory = (history: PoliceAlertPayload[]) => setAlerts([...history].reverse())
 
-    // Friend's cab channel
     const onStationCabs = (list: Array<CabState & { cabId: string }>) => {
       setCabs(new Map(list.map(c => [c.cabId ?? c.id, { ...c, cabId: c.cabId ?? c.id }])))
     }
@@ -201,63 +188,93 @@ export default function PoliceDashboard() {
     const onCabLeft = (cabId: string) => {
       setCabs(prev => { const m = new Map(prev); m.delete(cabId); return m })
     }
+    const onTraceChain = ({ cabId, chain }: { cabId: string; chain: { stationId: string; stationName: string; timestamp: number }[] }) => {
+      setTraceChains(prev => new Map(prev.set(cabId, chain)))
+    }
+    const onPredicted = (data: CabState & { cabId: string; type: string; predictedNextStationName?: string; stationName?: string }) => {
+      const stationName = data.type === "PREDICTED"
+        ? (data.predictedNextStationName || "Unknown")
+        : (data.stationName || "Unknown")
+      setPredictedIncoming(prev => [...prev.filter(p => !(p.cabId === data.cabId && p.stationName === stationName)), { cabId: data.cabId, stationName, type: data.type }])
+      setTimeout(() => setPredictedIncoming(prev => prev.filter(p => !(p.cabId === data.cabId && p.stationName === stationName))), 15000)
+    }
+    const onSilentAlert = (alert: { cabId: string }) => {
+      setAlertCabs(prev => new Set(prev).add(alert.cabId))
+      setCabs(prev => {
+        const cab = prev.get(alert.cabId)
+        if (cab) return new Map(prev.set(alert.cabId, { ...cab, isAlert: true }))
+        return prev
+      })
+    }
 
-    socket.on("POLICE_ALERT",   onAlert)
-    socket.on("ALERT_HISTORY",  onHistory)
-    socket.on("station_cabs",   onStationCabs)
-    socket.on("cab_update",     onCabUpdate)
-    socket.on("cab_left",       onCabLeft)
+    sock.on("POLICE_ALERT",   onAlert)
+    sock.on("ALERT_HISTORY",  onHistory)
+    sock.on("station_cabs",   onStationCabs)
+    sock.on("cab_update",     onCabUpdate)
+    sock.on("cab_left",       onCabLeft)
+    sock.on("trace_chain_update", onTraceChain)
+    sock.on("predicted_incoming", onPredicted)
+    sock.on("silent_alert",   onSilentAlert)
 
     return () => {
-      socket.off("POLICE_ALERT",  onAlert)
-      socket.off("ALERT_HISTORY", onHistory)
-      socket.off("station_cabs",  onStationCabs)
-      socket.off("cab_update",    onCabUpdate)
-      socket.off("cab_left",      onCabLeft)
+      sock.off("POLICE_ALERT",  onAlert)
+      sock.off("ALERT_HISTORY", onHistory)
+      sock.off("station_cabs",  onStationCabs)
+      sock.off("cab_update",    onCabUpdate)
+      sock.off("cab_left",      onCabLeft)
+      sock.off("trace_chain_update", onTraceChain)
+      sock.off("predicted_incoming", onPredicted)
+      sock.off("silent_alert",  onSilentAlert)
       releaseSocket()
     }
   }, [])
 
-  // Join station room when selection changes
   useEffect(() => {
     if (selectedStation) getSocket().emit("join_station", selectedStation)
   }, [selectedStation])
 
-  // ── Cab marker rendering ──────────────────────────────────────────────────
   useEffect(() => {
     if (!mapRef.current) return
     cabLayerRef.current.clearLayers()
     cabs.forEach(cab => {
+      const risk = cab.riskScore ?? 0
+      let color = "#00ff00"
+      if (risk >= 70) color = "#ff0000"
+      else if (risk >= 35) color = "#ffff00"
+      const isAlert = cab.isAlert || alertCabs.has(cab.cabId)
+      const flashClass = isAlert ? " cab-marker-flash" : ""
+
       const icon = L.divIcon({
-        html: `<div class="cab-marker-wrap">
+        html: `<div class="cab-marker-wrap${flashClass}" style="--cab-color: ${color};">
           <div class="cab-icon">🚕</div>
           <div class="cab-label">${cab.cabId}</div>
+          ${risk > 0 ? `<div class="cab-risk">${risk}</div>` : ""}
         </div>`,
         className: "custom-cab-marker",
-        iconSize: [40, 40],
-        iconAnchor: [20, 20],
+        iconSize: [44, 44],
+        iconAnchor: [22, 22],
       })
       L.marker([cab.lat, cab.lon], { icon, pane: "cabs" }).addTo(cabLayerRef.current)
     })
-  }, [cabs])
+  }, [cabs, alertCabs])
 
-  // ── Simulate cab movement for demo ───────────────────────────────────────
   useEffect(() => {
     if (stations.length === 0) return
+    let simStep = 0
     const id = setInterval(() => {
       const st = stations.find(s => s.id === selectedStation) ?? stations[0]
-      const angle = Math.random() * 2 * Math.PI
-      const dist  = Math.random() * 0.018
+      const angle = (simStep * 0.15) % (2 * Math.PI)
+      const dist = 0.008 + (simStep % 5) * 0.002
       getSocket().emit("cab_position", {
         cabId: "cab_demo",
         lat: st.lat + dist * Math.cos(angle),
         lon: st.lon + dist * Math.sin(angle),
       })
+      simStep++
     }, 2500)
     return () => clearInterval(id)
   }, [selectedStation, stations])
 
-  // ── Verify selected alert ─────────────────────────────────────────────────
   useEffect(() => {
     if (!selectedAlert) { setVerifyStatus(null); return }
     if (!selectedAlert.publicKey || !selectedAlert.signature) { setVerifyStatus("unsigned"); return }
@@ -267,7 +284,6 @@ export default function PoliceDashboard() {
       .catch(() => setVerifyStatus("invalid"))
   }, [selectedAlert])
 
-  // ── Derived values ────────────────────────────────────────────────────────
   const stationsByArea = stations.reduce<Record<string, PoliceStation[]>>((acc, s) => {
     const area = s.area ?? "General"
     ;(acc[area] ??= []).push(s)
@@ -276,34 +292,21 @@ export default function PoliceDashboard() {
   const cabArray   = Array.from(cabs.values())
   const activeCabs = cabArray.filter(c => c.insideRadius).length
 
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-gray-900 text-green-400 font-mono select-none">
-
-      {/* ── Header ─────────────────────────────────────────────────────── */}
       <div className="bg-black border-b border-green-500 px-4 py-3 flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold tracking-widest text-green-400">
-            ▸ SAHAYAK POLICE PORTAL
-          </h1>
-          <p className="text-green-600 text-xs tracking-wider">
-            TACTICAL COMMAND &amp; CONTROL SYSTEM
-          </p>
+          <h1 className="text-xl font-bold tracking-widest text-green-400">▸ SAHAYAK POLICE PORTAL</h1>
+          <p className="text-green-600 text-xs tracking-wider">TACTICAL COMMAND &amp; CONTROL SYSTEM</p>
         </div>
         <div className="flex items-center gap-6">
           <span className="text-green-500 text-xs">{clockStr}</span>
-          <Link to="/" className="text-green-500 hover:text-green-300 border border-green-700 hover:border-green-400 px-3 py-1 text-xs rounded transition-colors">
-            ← HOME
-          </Link>
+          <Link to="/" className="text-green-500 hover:text-green-300 border border-green-700 hover:border-green-400 px-3 py-1 text-xs rounded transition-colors">← HOME</Link>
         </div>
       </div>
 
       <div className="flex h-[calc(100vh-56px)]">
-
-        {/* ── Sidebar ──────────────────────────────────────────────────── */}
         <div className="w-72 bg-[#0a0f0a] border-r border-green-800 p-3 overflow-y-auto space-y-3 flex-shrink-0">
-
-          {/* Station selector */}
           <div className="border border-green-700 rounded p-3">
             <p className="text-green-500 text-xs font-bold tracking-widest mb-2">▸ COMMAND STATION</p>
             <select
@@ -321,65 +324,91 @@ export default function PoliceDashboard() {
             </select>
           </div>
 
-          {/* Operational status */}
           <div className="border border-green-700 rounded p-3">
             <p className="text-green-500 text-xs font-bold tracking-widest mb-2">▸ OPERATIONAL STATUS</p>
             <div className="space-y-1 text-xs">
-              <div className="flex justify-between">
-                <span className="text-green-600">Stations</span>
-                <span className="text-green-300">{stations.length}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-green-600">Active Cabs</span>
-                <span className="text-green-300">{activeCabs}/{cabArray.length}</span>
-              </div>
+              <div className="flex justify-between"><span className="text-green-600">Stations</span><span className="text-green-300">{stations.length}</span></div>
+              <div className="flex justify-between"><span className="text-green-600">Active Cabs</span><span className="text-green-300">{activeCabs}/{cabArray.length}</span></div>
               <div className="flex justify-between">
                 <span className="text-green-600">Scan</span>
-                <span className={isScanning ? "text-green-400" : "text-yellow-400"}>
-                  {isScanning ? "● SCANNING" : "○ SILENT"}
-                </span>
+                <span className={isScanning ? "text-green-400" : "text-yellow-400"}>{isScanning ? "● SCANNING" : "○ SILENT"}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-green-600">Emergencies</span>
-                <span className={alerts.length > 0 ? "text-red-400" : "text-green-400"}>
-                  {alerts.length > 0 ? `⚠ ${alerts.length}` : "NONE"}
-                </span>
+                <span className={alerts.length > 0 ? "text-red-400" : "text-green-400"}>{alerts.length > 0 ? `⚠ ${alerts.length}` : "NONE"}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-green-600">Silent Alerts</span>
+                <span className={alertCabs.size > 0 ? "text-red-400 font-bold" : "text-green-400"}>{alertCabs.size > 0 ? `${alertCabs.size} ACTIVE` : "NONE"}</span>
               </div>
             </div>
           </div>
 
-          {/* Controls */}
           <button
             onClick={() => setIsScanning(v => !v)}
             className={`w-full py-2 text-xs font-bold rounded border transition-colors ${
-              isScanning
-                ? "bg-green-700 hover:bg-green-600 border-green-500 text-black"
-                : "bg-transparent hover:bg-green-900 border-green-700 text-green-400"
+              isScanning ? "bg-green-700 hover:bg-green-600 border-green-500 text-black" : "bg-transparent hover:bg-green-900 border-green-700 text-green-400"
             }`}
           >
             {isScanning ? "DISABLE SCAN" : "ENABLE SCAN"}
           </button>
 
-          {/* Active units */}
           <div className="border border-green-700 rounded p-3">
             <p className="text-green-500 text-xs font-bold tracking-widest mb-2">▸ ACTIVE UNITS</p>
             <div className="space-y-1 max-h-28 overflow-y-auto">
               {cabArray.length === 0 ? (
                 <p className="text-green-700 text-xs">No units detected</p>
               ) : (
-                cabArray.map(cab => (
-                  <div key={cab.cabId} className="flex justify-between text-xs">
-                    <span className="text-green-400">{cab.cabId}</span>
-                    <span className={cab.insideRadius ? "text-green-300" : "text-yellow-400"}>
-                      {cab.insideRadius ? "IN RANGE" : "OUT OF RANGE"}
-                    </span>
-                  </div>
-                ))
+                cabArray.map(cab => {
+                  const r = cab.riskScore ?? 0
+                  const riskColor = r >= 70 ? "text-red-400" : r >= 35 ? "text-yellow-400" : "text-green-300"
+                  return (
+                    <div
+                      key={cab.cabId}
+                      onClick={() => setSelectedCabForTrace(selectedCabForTrace === cab.cabId ? null : cab.cabId)}
+                      className={`flex justify-between text-xs cursor-pointer p-1 rounded hover:bg-gray-800 ${cab.isAlert ? "ring-1 ring-red-500" : ""}`}
+                    >
+                      <span className="text-green-400">{cab.cabId}</span>
+                      <div className="flex gap-2">
+                        <span className={riskColor}>R:{r}</span>
+                        <span className={cab.insideRadius ? "text-green-300" : "text-yellow-400"}>{cab.insideRadius ? "IN" : "OUT"}</span>
+                      </div>
+                    </div>
+                  )
+                })
               )}
             </div>
           </div>
 
-          {/* Emergency alerts */}
+          {predictedIncoming.length > 0 && (
+            <div className="border border-yellow-600 rounded p-3 bg-yellow-500/10">
+              <p className="text-yellow-400 text-xs font-bold mb-2">▸ INCOMING (PREDICTED)</p>
+              <div className="space-y-1 text-xs">
+                {predictedIncoming.map((p, i) => (
+                  <div key={i} className="text-yellow-300">{p.cabId} → {p.stationName}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="border border-green-700 rounded p-3">
+            <p className="text-green-500 text-xs font-bold tracking-widest mb-2">▸ TRACE CHAIN</p>
+            {selectedCabForTrace ? (
+              <div className="space-y-1 max-h-24 overflow-y-auto text-xs">
+                {(traceChains.get(selectedCabForTrace) || []).map((entry, i) => (
+                  <div key={i} className="text-green-300 flex justify-between">
+                    <span>{new Date(entry.timestamp).toLocaleTimeString()}</span>
+                    <span>{entry.stationName}</span>
+                  </div>
+                ))}
+                {(traceChains.get(selectedCabForTrace) || []).length === 0 && <div className="text-green-500">No hops yet</div>}
+                <button onClick={() => setSelectedCabForTrace(null)} className="text-green-500 hover:underline mt-2 text-[10px]">Close</button>
+              </div>
+            ) : (
+              <p className="text-green-600 text-xs">Click a cab above to view trace</p>
+            )}
+          </div>
+
           <div className="border border-red-800 rounded p-3">
             <p className="text-red-400 text-xs font-bold tracking-widest mb-2">▸ EMERGENCY ALERTS</p>
             <div className="space-y-1 max-h-40 overflow-y-auto">
@@ -391,43 +420,23 @@ export default function PoliceDashboard() {
                     key={i}
                     onClick={() => setSelectedAlert(prev => prev === a ? null : a)}
                     className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors ${
-                      selectedAlert === a
-                        ? "bg-red-900/60 border border-red-500"
-                        : "bg-red-950/30 hover:bg-red-900/40 border border-red-900"
+                      selectedAlert === a ? "bg-red-900/60 border border-red-500" : "bg-red-950/30 hover:bg-red-900/40 border border-red-900"
                     }`}
                   >
                     <div className="text-red-300 font-bold truncate">{a.payload?.tripId ?? "UNKNOWN"}</div>
                     <div className="text-red-500 text-[10px]">
-                      {a.payload?.location
-                        ? `${a.payload.location.lat.toFixed(4)}, ${a.payload.location.lng.toFixed(4)}`
-                        : "—"}
+                      {a.payload?.location ? `${a.payload.location.lat.toFixed(4)}, ${a.payload.location.lng.toFixed(4)}` : "—"}
                     </div>
                   </button>
                 ))
               )}
             </div>
-
-            {/* Verification badge */}
             {selectedAlert && (
               <div className="mt-2 pt-2 border-t border-red-800 text-xs">
-                {verifyStatus === "pending" && (
-                  <span className="text-yellow-400">⏳ Verifying…</span>
-                )}
-                {verifyStatus === "verified" && (
-                  <span className="text-green-400 flex items-center gap-1">
-                    <ShieldCheck className="w-3 h-3" /> SIGNATURE VALID
-                  </span>
-                )}
-                {verifyStatus === "invalid" && (
-                  <span className="text-red-400 flex items-center gap-1">
-                    <ShieldX className="w-3 h-3" /> SIGNATURE INVALID
-                  </span>
-                )}
-                {verifyStatus === "unsigned" && (
-                  <span className="text-yellow-500 flex items-center gap-1">
-                    <ShieldAlert className="w-3 h-3" /> UNSIGNED PACKET
-                  </span>
-                )}
+                {verifyStatus === "pending" && <span className="text-yellow-400">⏳ Verifying…</span>}
+                {verifyStatus === "verified" && <span className="text-green-400 flex items-center gap-1"><ShieldCheck className="w-3 h-3" /> SIGNATURE VALID</span>}
+                {verifyStatus === "invalid" && <span className="text-red-400 flex items-center gap-1"><ShieldX className="w-3 h-3" /> SIGNATURE INVALID</span>}
+                {verifyStatus === "unsigned" && <span className="text-yellow-500 flex items-center gap-1"><ShieldAlert className="w-3 h-3" /> UNSIGNED PACKET</span>}
                 {selectedAlert.payload && (
                   <div className="mt-1 text-[10px] text-red-400 space-y-0.5">
                     <div>TRIP: {selectedAlert.payload.tripId}</div>
@@ -438,73 +447,42 @@ export default function PoliceDashboard() {
               </div>
             )}
           </div>
-
         </div>
 
-        {/* ── Map ──────────────────────────────────────────────────────── */}
         <div className="flex-1 relative">
           <div ref={mapContainerRef} className="w-full h-full" />
-
-          {/* Overlay info */}
           <div className="absolute top-3 right-3 bg-black/80 border border-green-700 rounded p-2 text-green-400 text-xs z-[999] space-y-0.5">
             <div>GRID  <span className="text-green-300">ACTIVE</span></div>
             <div>RANGE <span className="text-green-300">2 KM</span></div>
             <div>MODE  <span className="text-green-300">TACTICAL</span></div>
           </div>
-
-          {/* Legend */}
           <div className="absolute bottom-3 right-3 bg-black/80 border border-green-700 rounded p-2 text-[10px] z-[999] space-y-1">
             <div className="flex items-center gap-2">
               <span className="inline-block w-3 h-3 rounded-full bg-green-400 border border-white" />
-              <span className="text-green-400">Police Station</span>
+              <span>Police Station</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="inline-block w-3 h-3 rounded-full bg-red-500" />
-              <span className="text-red-400">Emergency Alert</span>
+              <span className="text-red-400">Emergency</span>
             </div>
             <div className="flex items-center gap-2">
               <span className="text-lg leading-3">🚕</span>
-              <span className="text-green-400">Active Cab</span>
+              <span>Cab (Green/Yellow/Red = Risk)</span>
             </div>
           </div>
         </div>
       </div>
 
       <style>{`
-        .ps-tooltip {
-          background: rgba(0,0,0,0.85) !important;
-          border: 1px solid #00ff00 !important;
-          color: #00ff00 !important;
-          font-family: monospace !important;
-          font-size: 11px !important;
-          padding: 3px 7px !important;
-        }
-        .alert-tooltip {
-          background: rgba(0,0,0,0.85) !important;
-          border: 1px solid #ff0000 !important;
-          color: #ff4444 !important;
-          font-family: monospace !important;
-          font-size: 11px !important;
-        }
-        .custom-cab-marker {
-          background: transparent !important;
-          border: none !important;
-        }
-        .cab-marker-wrap {
-          text-align: center;
-          color: #00ff00;
-          font-family: monospace;
-          font-weight: bold;
-        }
+        .ps-tooltip { background: rgba(0,0,0,0.85) !important; border: 1px solid #00ff00 !important; color: #00ff00 !important; font-family: monospace !important; font-size: 11px !important; padding: 3px 7px !important; }
+        .alert-tooltip { background: rgba(0,0,0,0.85) !important; border: 1px solid #ff0000 !important; color: #ff4444 !important; font-family: monospace !important; font-size: 11px !important; }
+        .custom-cab-marker { background: transparent !important; border: none !important; }
+        .cab-marker-wrap { text-align: center; color: var(--cab-color, #00ff00); font-family: monospace; font-weight: bold; }
         .cab-icon { font-size: 18px; margin-bottom: 1px; }
-        .cab-label {
-          background: rgba(0,0,0,0.85);
-          border: 1px solid #00ff00;
-          border-radius: 3px;
-          padding: 1px 4px;
-          font-size: 9px;
-          white-space: nowrap;
-        }
+        .cab-label { background: rgba(0,0,0,0.85); border: 1px solid var(--cab-color, #00ff00); border-radius: 3px; padding: 1px 4px; font-size: 9px; white-space: nowrap; }
+        .cab-risk { font-size: 9px; color: var(--cab-color, #00ff00); margin-top: 1px; }
+        .cab-marker-flash { animation: cab-flash 0.8s ease-in-out infinite; }
+        @keyframes cab-flash { 0%, 100% { opacity: 1; filter: brightness(1); } 50% { opacity: 0.7; filter: brightness(1.5); } }
       `}</style>
     </div>
   )

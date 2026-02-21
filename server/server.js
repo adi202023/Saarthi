@@ -11,6 +11,7 @@ const { Server } = require("socket.io")
 const cors   = require("cors")
 const geo    = require("./geo")
 const crypto = require("./crypto")
+const intel  = require("./intelligence")
 
 const app    = express()
 const server = http.createServer(app)
@@ -21,9 +22,11 @@ app.use(express.json())
 
 // ── In-memory state ───────────────────────────────────────────────────────────
 
-const alertLog  = []          // signed emergency alerts
-const cabState  = new Map()   // cabId → CabState
-let lastAlertHash = "0"
+const alertLog      = []
+const cabState      = new Map()
+const movementHist  = new Map()
+const traceChain    = new Map()
+let lastAlertHash   = "0"
 
 // ── REST API ──────────────────────────────────────────────────────────────────
 
@@ -97,27 +100,77 @@ io.on("connection", (socket) => {
       .filter(([, s]) => s.stationId === stationId)
       .map(([id, s]) => ({ id, ...s }))
     socket.emit("station_cabs", cabs)
+    for (const [cabId, chain] of traceChain.entries()) {
+      const cab = cabState.get(cabId)
+      if (cab && cab.stationId === stationId) socket.emit("trace_chain_update", { cabId, chain })
+    }
   })
 
   socket.on("cab_position", (data) => {
     const { cabId, lat, lon } = data
+    const now = Date.now()
+
+    let hist = movementHist.get(cabId) || []
+    hist.push({ lat, lon, ts: now })
+    if (hist.length > 20) hist = hist.slice(-20)
+    movementHist.set(cabId, hist)
+
     const station   = geo.getOwningStation(lat, lon)
     const prevState = cabState.get(cabId)
     const prevStationId = prevState?.stationId
 
     const tripToken = prevState?.tripToken || crypto.generateTripToken({ cabId, lat, lon })
+    const riskScore = intel.computeRiskScore(cabId, movementHist, traceChain)
+    const predictedNext = intel.predictNextStation(cabId, movementHist, geo.getStations())
+
     const newState  = {
       lat, lon,
       stationId: station.id,
+      stationName: station.name,
       tripToken,
       insideRadius: station.insideRadius,
-      lastUpdate: Date.now(),
+      lastUpdate: now,
+      riskScore,
+      predictedNextStationId: predictedNext ? predictedNext.id : null,
+      predictedNextStationName: predictedNext ? predictedNext.name : null,
+      isAlert: false,
     }
-    cabState.set(cabId, newState)
 
-    if (prevStationId && prevStationId !== station.id)
+    if (prevStationId && prevStationId !== station.id) {
+      const entry = intel.buildTraceEntry(station.id, station.name)
+      const chain = intel.chainTrace(traceChain, cabId, entry)
       io.to(`station:${prevStationId}`).emit("cab_left", cabId)
+      io.emit("trace_chain_update", { cabId, chain })
+      io.to(`station:${station.id}`).emit("predicted_incoming", { cabId, ...newState, type: "ACTUAL" })
+    } else if (!prevStationId && station.insideRadius) {
+      const entry = intel.buildTraceEntry(station.id, station.name)
+      const chain = intel.chainTrace(traceChain, cabId, entry)
+      io.emit("trace_chain_update", { cabId, chain })
+    }
+    if (predictedNext && predictedNext.id !== station.id) {
+      io.to(`station:${predictedNext.id}`).emit("predicted_incoming", {
+        cabId, ...newState, type: "PREDICTED", etaSeconds: 90,
+      })
+    }
 
+    const distressTriggers = intel.checkSilentDistress(cabId, movementHist, traceChain, riskScore)
+    if (distressTriggers.length > 0) {
+      newState.isAlert = true
+      newState.distressTriggers = distressTriggers
+      const alertPayload = {
+        cabId, lat, lon, stationId: station.id, riskScore,
+        traceChain: traceChain.get(cabId) || [],
+        triggers: distressTriggers, type: "SILENT_DISTRESS",
+        severity: riskScore >= 75 ? "CRITICAL" : riskScore >= 50 ? "HIGH" : "MEDIUM",
+      }
+      const alert = { id: `alert_${Date.now()}`, ...alertPayload, prevHash: lastAlertHash, timestamp: Date.now() }
+      alert.hash = crypto.sha256(alert)
+      lastAlertHash = alert.hash
+      alertLog.push(alert)
+      io.emit("silent_alert", alert)
+    }
+
+    cabState.set(cabId, newState)
     io.to(`station:${station.id}`).emit("cab_update", { cabId, ...newState })
   })
 
