@@ -107,7 +107,7 @@ io.on("connection", (socket) => {
   })
 
   socket.on("cab_position", (data) => {
-    const { cabId, lat, lon } = data
+    const { cabId, lat, lon, source, destination, route } = data
     const now = Date.now()
 
     let hist = movementHist.get(cabId) || []
@@ -123,8 +123,14 @@ io.on("connection", (socket) => {
     const riskScore = intel.computeRiskScore(cabId, movementHist, traceChain)
     const predictedNext = intel.predictNextStation(cabId, movementHist, geo.getStations())
 
+    const prevDest = prevState?.destination ?? null
+    const prevSrc = prevState?.source ?? null
+    const prevRoute = prevState?.route ?? null
     const newState  = {
       lat, lon,
+      source: source ?? prevSrc,
+      destination: destination ?? prevDest,
+      route: Array.isArray(route) ? route : prevRoute,
       stationId: station.id,
       stationName: station.name,
       tripToken,

@@ -493,6 +493,24 @@ export default function CabPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [corridor, routeCoords])
 
+  // ── Sync source/destination/route to Police Portal when dest or route changes ──
+  useEffect(() => {
+    const current = tripRef.current
+    if (!current || (current.status !== "ACTIVE" && current.status !== "ALERT")) return
+    const pos = simPosRef.current
+    const route = routeCoordsRef.current
+    const dest = destinationRef.current
+    const src = current.startLocation ? { lat: current.startLocation.lat, lng: current.startLocation.lng } : null
+    getSocket().emit("cab_position", {
+      cabId: current.tripId,
+      lat: pos.lat,
+      lon: pos.lng,
+      source: src,
+      destination: dest ? { lat: dest.lat, lng: dest.lng } : null,
+      route: route.length >= 2 ? route : (dest && src ? [src, dest] : []),
+    })
+  }, [destination?.lat, destination?.lng, routeCoords])
+
   // ── Nav scroll ────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -804,6 +822,17 @@ export default function CabPage() {
       tripRef.current = updated
       setTrip(updated)
       saveTrip(updated)
+      const dest = destinationRef.current
+      const route = routeCoordsRef.current
+      const src = current.startLocation ? { lat: current.startLocation.lat, lng: current.startLocation.lng } : null
+      getSocket().emit("cab_position", {
+        cabId: current.tripId,
+        lat,
+        lon: lng,
+        source: src,
+        destination: dest ? { lat: dest.lat, lng: dest.lng } : null,
+        route: route.length >= 2 ? route : (dest && src ? [src, dest] : []),
+      })
     }
 
     simPosRef.current = { lat, lng }
@@ -1113,6 +1142,15 @@ export default function CabPage() {
       setTrip(newTrip); saveTrip(newTrip); tripRef.current = newTrip
       simPosRef.current = { lat, lng }
 
+      getSocket().emit("cab_position", {
+        cabId: newTrip.tripId,
+        lat,
+        lon: lng,
+        source: { lat, lng },
+        destination: null,
+        route: [],
+      })
+
       placeMarker(lat, lng, simMode ? "Sim Start" : "Trip Started")
       mapInstanceRef.current?.flyTo([lat, lng], 15, { animate: true, duration: 1.3 })
       appendToPolyline(lat, lng, simMode ? "#2563EB" : "#7C3AED")
@@ -1134,6 +1172,7 @@ export default function CabPage() {
     setAwaitingDest(false)
     const current = tripRef.current
     if (!current) return
+    getSocket().emit("cab_trip_ended", { cabId: current.tripId })
     const completed: Trip = { ...current, status: "COMPLETED" }
     setTrip(completed); saveTrip(completed); tripRef.current = completed
     setDeviationAlert(false)

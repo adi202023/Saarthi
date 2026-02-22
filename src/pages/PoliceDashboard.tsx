@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Link } from "react-router-dom"
+import { Link, useLocation } from "react-router-dom"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
 import { getSocket, releaseSocket } from "../lib/socket"
@@ -24,6 +24,15 @@ export default function PoliceDashboard() {
   const alertLayerRef     = useRef<L.LayerGroup>(new L.LayerGroup())
   const scanCircleRef     = useRef<L.Circle | null>(null)
   const gridLayerRef      = useRef<L.LayerGroup>(new L.LayerGroup())
+  const destMarkersRef    = useRef<Map<string, L.CircleMarker>>(new Map())
+  const sourceMarkersRef  = useRef<Map<string, L.CircleMarker>>(new Map())
+  const routePolylinesRef = useRef<Map<string, L.Polyline>>(new Map())
+  const stationCabLinesRef = useRef<Map<string, L.Polyline>>(new Map())
+  const hasInitialFitRef   = useRef(false)
+  const stationsRef        = useRef<PoliceStation[]>([])
+
+  const loc = useLocation()
+  const isVisible = loc.pathname === "/police"
 
   const [stations,         setStations]         = useState<PoliceStation[]>([])
   const [selectedStation,  setSelectedStation]  = useState<string>("")
@@ -42,6 +51,10 @@ export default function PoliceDashboard() {
     const id = setInterval(() => setClockStr(new Date().toLocaleString()), 1000)
     return () => clearInterval(id)
   }, [])
+
+  useEffect(() => {
+    stationsRef.current = stations
+  }, [stations])
 
   useEffect(() => {
     fetch(`${API_BASE}/api/stations`)
@@ -104,7 +117,32 @@ export default function PoliceDashboard() {
     map.on("zoomend", drawGrid)
     drawGrid()
 
-    return () => { map.remove(); mapRef.current = null }
+    const container = mapContainerRef.current
+    const doInvalidateAndFit = () => {
+      map.invalidateSize()
+      if (!container || container.offsetWidth === 0 || container.offsetHeight === 0) return
+      if (hasInitialFitRef.current) return
+      const st = stationsRef.current
+      if (st.length === 0) return
+      const group = new L.FeatureGroup()
+      st.forEach(s => group.addLayer(L.circle([s.lat, s.lon], { radius: 2000 })))
+      try {
+        hasInitialFitRef.current = true
+        map.fitBounds(group.getBounds(), { padding: [40, 40], maxZoom: 12 })
+      } catch {}
+    }
+    const ro = container ? new ResizeObserver(doInvalidateAndFit) : null
+    if (container) ro?.observe(container)
+    window.addEventListener("resize", doInvalidateAndFit)
+    const t = setTimeout(doInvalidateAndFit, 150)
+
+    return () => {
+      ro?.disconnect()
+      window.removeEventListener("resize", doInvalidateAndFit)
+      clearTimeout(t)
+      map.remove()
+      mapRef.current = null
+    }
   }, [])
 
   useEffect(() => {
@@ -133,8 +171,27 @@ export default function PoliceDashboard() {
         }))
       }
     })
-    try { mapRef.current!.fitBounds(group.getBounds(), { padding: [20, 20] }) } catch {}
+    const container = mapContainerRef.current
+    const hasSize = container && container.offsetWidth > 0 && container.offsetHeight > 0
+    if (!hasInitialFitRef.current && hasSize) {
+      hasInitialFitRef.current = true
+      try { mapRef.current!.fitBounds(group.getBounds(), { padding: [40, 40], maxZoom: 12 }) } catch {}
+    }
   }, [stations, selectedStation])
+
+  // Invalidate map size when becoming visible (navigating from Cab to Police)
+  useEffect(() => {
+    if (!isVisible) return
+    const map = mapRef.current
+    if (!map) return
+    const run = () => {
+      map.invalidateSize()
+      map.invalidateSize()
+    }
+    const t1 = setTimeout(run, 50)
+    const t2 = setTimeout(run, 200)
+    return () => { clearTimeout(t1); clearTimeout(t2) }
+  }, [isVisible])
 
   useEffect(() => {
     const map = mapRef.current
@@ -234,8 +291,19 @@ export default function PoliceDashboard() {
   }, [selectedStation])
 
   useEffect(() => {
-    if (!mapRef.current) return
+    const map = mapRef.current
+    if (!map) return
+
     cabLayerRef.current.clearLayers()
+    destMarkersRef.current.forEach(m => { try { map.removeLayer(m) } catch {} })
+    destMarkersRef.current.clear()
+    sourceMarkersRef.current.forEach(m => { try { map.removeLayer(m) } catch {} })
+    sourceMarkersRef.current.clear()
+    routePolylinesRef.current.forEach(p => { try { map.removeLayer(p) } catch {} })
+    routePolylinesRef.current.clear()
+    stationCabLinesRef.current.forEach(p => { try { map.removeLayer(p) } catch {} })
+    stationCabLinesRef.current.clear()
+
     cabs.forEach(cab => {
       const risk = cab.riskScore ?? 0
       let color = "#00ff00"
@@ -255,8 +323,59 @@ export default function PoliceDashboard() {
         iconAnchor: [22, 22],
       })
       L.marker([cab.lat, cab.lon], { icon, pane: "cabs" }).addTo(cabLayerRef.current)
+
+      // Source marker (trip start)
+      const src = cab.source
+      if (src && (src.lat !== cab.lat || src.lng !== cab.lon)) {
+        const sm = L.circleMarker([src.lat, src.lng], {
+          radius: 6, fillColor: "#7C3AED", color: "#ffffff",
+          weight: 2, fillOpacity: 0.9, pane: "cabs",
+        }).bindTooltip(`${cab.cabId} Start`, { className: "ps-tooltip" }).addTo(map)
+        sourceMarkersRef.current.set(cab.cabId, sm)
+      }
+
+      // Route polyline (source → destination)
+      const route = cab.route
+      if (route && route.length >= 2) {
+        const lls = route.map(p => [p.lat, p.lng] as L.LatLngTuple)
+        const pl = L.polyline(lls, { color: "#a78bfa", weight: 3, opacity: 0.8, pane: "cabs" }).addTo(map)
+        routePolylinesRef.current.set(cab.cabId, pl)
+      }
+
+      // Destination marker
+      const dest = cab.destination
+      if (dest && (dest.lat !== cab.lat || dest.lng !== cab.lon)) {
+        const dm = L.circleMarker([dest.lat, dest.lng], {
+          radius: 8, fillColor: "#10b981", color: "#ffffff",
+          weight: 2, fillOpacity: 0.9, pane: "cabs",
+        }).bindTooltip(`${cab.cabId} Destination`, { className: "ps-tooltip" }).addTo(map)
+        destMarkersRef.current.set(cab.cabId, dm)
+      }
+
+      // Station–cab connection line (real-time: station monitoring this cab)
+      if (cab.insideRadius && cab.stationId) {
+        const st = stations.find(s => s.id === cab.stationId)
+        if (st) {
+          const line = L.polyline(
+            [[st.lat, st.lon], [cab.lat, cab.lon]] as L.LatLngTuple[],
+            { color: "#ef4444", weight: 2.5, dashArray: "6 10", opacity: 0.85, pane: "cabs" }
+          ).addTo(map)
+          stationCabLinesRef.current.set(cab.cabId, line)
+        }
+      }
     })
-  }, [cabs, alertCabs])
+
+    return () => {
+      destMarkersRef.current.forEach(m => { try { map.removeLayer(m) } catch {} })
+      destMarkersRef.current.clear()
+      sourceMarkersRef.current.forEach(m => { try { map.removeLayer(m) } catch {} })
+      sourceMarkersRef.current.clear()
+      routePolylinesRef.current.forEach(p => { try { map.removeLayer(p) } catch {} })
+      routePolylinesRef.current.clear()
+      stationCabLinesRef.current.forEach(p => { try { map.removeLayer(p) } catch {} })
+      stationCabLinesRef.current.clear()
+    }
+  }, [cabs, alertCabs, stations])
 
   useEffect(() => {
     if (stations.length === 0) return

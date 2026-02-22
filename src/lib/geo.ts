@@ -14,6 +14,9 @@ export interface CabState {
   id: string
   lat: number
   lon: number
+  source?: { lat: number; lng: number } | null
+  destination?: { lat: number; lng: number } | null
+  route?: Array<{ lat: number; lng: number }>
   stationId: string
   stationName?: string
   tripToken: string
