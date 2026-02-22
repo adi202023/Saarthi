@@ -11,7 +11,7 @@ import { ShieldCheck, ShieldX, ShieldAlert } from "lucide-react"
 const INITIAL_CENTER: [number, number] = [12.9716, 77.5946]
 const INITIAL_ZOOM = 11
 
-const API_BASE = "http://localhost:4000"
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:4000"
 
 type VerifyStatus = "pending" | "verified" | "invalid" | "unsigned" | null
 
