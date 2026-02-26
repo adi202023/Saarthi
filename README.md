@@ -111,7 +111,11 @@ The Express + Socket.io server must be deployed separately (Vercel is serverless
 
 | Variable | Description |
 |----------|-------------|
-| `VITE_API_URL` | Backend URL (e.g. `https://saarthi-api.onrender.com`) – set in Vercel for production |
+| `VITE_API_URL` | Backend URL (e.g. `https://saarthi-api.onrender.com`) – set in Vercel → Project Settings → Environment Variables for production |
+
+**Without a backend:** The Police Dashboard and Cab Portal work in demo mode using static station data. Deploy the backend and set `VITE_API_URL` for live tracking, WebSocket updates, and emergency alerts.
+
+**Important:** On deployed sites, never set `VITE_API_URL` to `http://localhost:4000` — the app ignores localhost URLs when not running locally. Use your deployed backend URL (e.g. `https://your-api.onrender.com`).
 
 ---
 

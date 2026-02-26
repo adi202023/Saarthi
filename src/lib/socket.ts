@@ -1,27 +1,41 @@
 import { io, Socket } from "socket.io-client"
 import type { CabState, TraceChainEntry, SilentAlert } from "./geo"
 
-const SERVER_URL = import.meta.env.VITE_API_URL || "http://localhost:4000"
+const rawUrl = import.meta.env.VITE_API_URL ?? ""
+const isDeployed = typeof window !== "undefined" &&
+  !/^(localhost|127\.0\.0\.1)(:\d+)?$/i.test(window.location.host)
+const pointsToLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(rawUrl)
+
+// On deployed site: never use localhost, skip connection when no valid backend
+const hasBackend = rawUrl && (!isDeployed || !pointsToLocalhost)
+const SERVER_URL = hasBackend ? rawUrl : ""
+const shouldConnect = hasBackend || (import.meta.env.DEV && rawUrl === "")
+
+/** Effective API base URL. Empty when no backend (use static fallback). */
+export const API_BASE = hasBackend ? SERVER_URL : ""
 
 let socket: Socket | null = null
 let refCount = 0
 
 export function getSocket(): Socket {
   if (!socket) {
-    socket = io(SERVER_URL, {
-      transports:           ["websocket"],   // skip long-polling — connect immediately
-      autoConnect:          true,
-      reconnectionAttempts: 10,
+    socket = io(SERVER_URL || undefined, {
+      transports:           ["websocket"],
+      autoConnect:          shouldConnect,
+      reconnection:         shouldConnect,
+      reconnectionAttempts: shouldConnect ? 10 : 0,
       reconnectionDelay:    1500,
     })
-    socket.on("connect", () =>
-      console.log("[socket] ✅ Connected  id=", socket?.id))
-    socket.on("connect_error", (err) =>
-      console.error("[socket] ❌ Connection error:", err.message))
-    socket.on("disconnect", (reason) =>
-      console.log("[socket] 🔌 Disconnected:", reason))
-    socket.on("reconnect", (attempt) =>
-      console.log("[socket] 🔄 Reconnected after attempt", attempt))
+    if (shouldConnect) {
+      socket.on("connect", () =>
+        console.log("[socket] ✅ Connected  id=", socket?.id))
+      socket.on("connect_error", (err) =>
+        console.error("[socket] ❌ Connection error:", err.message))
+      socket.on("disconnect", (reason) =>
+        console.log("[socket] 🔌 Disconnected:", reason))
+      socket.on("reconnect", (attempt) =>
+        console.log("[socket] 🔄 Reconnected after attempt", attempt))
+    }
   }
   refCount++
   return socket

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { Link, useLocation } from "react-router-dom"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
-import { getSocket, releaseSocket } from "../lib/socket"
+import { getSocket, releaseSocket, API_BASE } from "../lib/socket"
 import type { PoliceAlertPayload } from "../lib/socket"
 import type { PoliceStation, CabState } from "../lib/geo"
 import { verifyPayload } from "../lib/crypto"
@@ -10,8 +10,6 @@ import { ShieldCheck, ShieldX, ShieldAlert } from "lucide-react"
 
 const INITIAL_CENTER: [number, number] = [12.9716, 77.5946]
 const INITIAL_ZOOM = 11
-
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:4000"
 
 type VerifyStatus = "pending" | "verified" | "invalid" | "unsigned" | null
 
@@ -46,6 +44,7 @@ export default function PoliceDashboard() {
   const [predictedIncoming, setPredictedIncoming] = useState<Array<{ cabId: string; stationName: string; type: string }>>([])
   const [alertCabs,        setAlertCabs]        = useState<Set<string>>(new Set())
   const [selectedCabForTrace, setSelectedCabForTrace] = useState<string | null>(null)
+  const [backendOnline, setBackendOnline] = useState<boolean | null>(null)
 
   useEffect(() => {
     const id = setInterval(() => setClockStr(new Date().toLocaleString()), 1000)
@@ -57,13 +56,30 @@ export default function PoliceDashboard() {
   }, [stations])
 
   useEffect(() => {
-    fetch(`${API_BASE}/api/stations`)
-      .then(r => r.json())
-      .then((data: PoliceStation[]) => {
-        setStations(data)
-        if (data.length > 0) setSelectedStation(data[0].id)
+    const apiUrl = API_BASE ? `${API_BASE}/api/stations` : "/api/stations"
+    fetch(apiUrl)
+      .then(r => {
+        if (!r.ok) throw new Error("API unavailable")
+        return r.json()
       })
-      .catch(console.error)
+      .then((data: PoliceStation[]) => {
+        const normalized = data.map((s: { lng?: number; lon?: number }) =>
+          ({ ...s, lon: s.lon ?? s.lng }))
+        setStations(normalized)
+        if (normalized.length > 0) setSelectedStation(normalized[0].id)
+        setBackendOnline(true)
+      })
+      .catch(() => {
+        fetch("/police_stations_bangalore_mysore.json")
+          .then(r => r.json())
+          .then((data: Array<{ lng?: number; lon?: number } & PoliceStation>) => {
+            const normalized = data.map(s => ({ ...s, lon: s.lon ?? s.lng }))
+            setStations(normalized)
+            if (normalized.length > 0) setSelectedStation(normalized[0].id)
+          })
+          .catch(console.error)
+        setBackendOnline(false)
+      })
   }, [])
 
   useEffect(() => {
@@ -378,13 +394,15 @@ export default function PoliceDashboard() {
   }, [cabs, alertCabs, stations])
 
   useEffect(() => {
-    if (stations.length === 0) return
+    if (stations.length === 0 || backendOnline === false) return
     let simStep = 0
     const id = setInterval(() => {
+      const sock = getSocket()
+      if (!sock.connected) return
       const st = stations.find(s => s.id === selectedStation) ?? stations[0]
       const angle = (simStep * 0.15) % (2 * Math.PI)
       const dist = 0.008 + (simStep % 5) * 0.002
-      getSocket().emit("cab_position", {
+      sock.emit("cab_position", {
         cabId: "cab_demo",
         lat: st.lat + dist * Math.cos(angle),
         lon: st.lon + dist * Math.sin(angle),
@@ -392,7 +410,7 @@ export default function PoliceDashboard() {
       simStep++
     }, 2500)
     return () => clearInterval(id)
-  }, [selectedStation, stations])
+  }, [selectedStation, stations, backendOnline])
 
   useEffect(() => {
     if (!selectedAlert) { setVerifyStatus(null); return }
@@ -413,6 +431,11 @@ export default function PoliceDashboard() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-green-400 font-mono select-none">
+      {backendOnline === false && (
+        <div className="bg-amber-900/90 border-b border-amber-500 px-4 py-2 text-amber-200 text-sm">
+          Demo mode — using static station data. Deploy the backend and set <code className="bg-black/30 px-1 rounded">VITE_API_URL</code> for live tracking.
+        </div>
+      )}
       <div className="bg-black border-b border-green-500 px-4 py-3 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold tracking-widest text-green-400">▸ Saarthi POLICE PORTAL</h1>

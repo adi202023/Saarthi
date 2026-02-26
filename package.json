@@ -10,7 +10,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "server": "node server/server.js",
     "server:index": "node server/index.js",
-    "scrape": "cd scripts && python scrape_police_stations.py"
+    "scrape": "cd scripts && python scrape_police_stations.py",
+    "dev:all": "concurrently \"npm run server\" \"npm run dev\""
   },
   "keywords": [],
   "author": "",
@@ -33,6 +34,8 @@
     "@turf/turf": "^7.3.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.6",
     "express": "^5.2.1",
     "framer-motion": "^12.34.3",
     "gsap": "^3.14.2",

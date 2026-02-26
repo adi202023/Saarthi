@@ -20,6 +20,16 @@ const io     = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"
 app.use(cors())
 app.use(express.json())
 
+// Root route – redirect to frontend or show API info (prevents "invalid response")
+app.get("/", (_req, res) => {
+  res.json({
+    name: "Sahayak API",
+    status: "ok",
+    message: "Backend API + WebSocket. Use the frontend at http://localhost:5173",
+    endpoints: { health: "/health", stations: "/api/stations", publicKey: "/api/crypto/public-key" },
+  })
+})
+
 // ── In-memory state ───────────────────────────────────────────────────────────
 
 const alertLog      = []
